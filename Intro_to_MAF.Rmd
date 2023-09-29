@@ -1,0 +1,182 @@
+---
+title: "Intro to MAF"
+author: Nicole Black, Wade Boohar
+date: 07/17/22
+updated: 09/17/23
+---
+
+***Deliverables***
+-Upload this R Notebook to your GitHub and submit the link to your Repo on BB.
+-Include any graphs or figures created in this assignment in the folder with your R notebook with descriptive file names.
+
+Since this is an optional partner activity, it is okay if your answers are the same as your partner’s as long as everyone understands it and could explain it in their own words if asked. Each person must individually push their code to Github. *At the top of your R Notebook, write the name of you and your partner(s) as a comment.*
+
+***Complete the following coding activity and answer any following questions as comments in your R Notebook***
+
+In MAF_Tutorial.Rmd, you looked at how to analyze mutation data in terms of clinical variables as well as mutation status. In this assignment, you will need to combine the two skills to demonstrate your understanding of categorical variables and R data structures.
+
+## partner: Rebecca Aviles
+*Pre-Assignment*
+Load all necessary packages, read in the clinical data .csv file you have in your analysis_data folder, and instantiate the MAF_object.
+
+```{r setup}
+    knitr::opts_knit$set(root.dir = normalizePath("/Users/ErikaLi/desktop/qbio/QBIO_490_erikali/analysis_data")) 
+```
+
+
+```{r}
+
+if (!require("BiocManager", quietly = TRUE))
+install.packages("BiocManager")
+BiocManager::install(version = "3.17")
+if (!require("TCGAbiolinks", quietly = TRUE))
+BiocManager::install("TCGAbiolinks")
+if (!require("maftools", quietly = TRUE))
+BiocManager::install("maftools")
+library(BiocManager)
+library(TCGAbiolinks)
+library(maftools)
+library(ggplot2)
+
+
+clinical <- read.csv("/Users/ErikaLi/desktop/qbio/QBIO_490_erikali/analysis_data/brca_clinical_data.csv")
+colnames(clinical)[ colnames(clinical) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+write.csv(clinical, "/Users/ErikaLi/desktop/qbio/QBIO_490_erikali/analysis_data/brca_clinical_data.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+maf_query <- GDCquery(
+    project = "TCGA-BRCA", 
+    data.category = "Simple Nucleotide Variation", 
+    access = "open", # we only have access to somatic mutations which are open access
+    data.type = "Masked Somatic Mutation", 
+    workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+
+#GDCdownload(maf_query)
+
+maf <- GDCprepare(maf_query) # as long as it runs, ignore any errors
+
+maf_object <- read.maf(maf = maf, 
+                       clinicalData = clinical,
+                       isTCGA = TRUE)
+```
+
+
+*1*
+Choose a clinical variable (or any variable from clin_rad or clin_drug) to separate your populations into two different groups and rewrite the column or create a new column with that variable as a factor. ***Do not use age or vital_status as your clinical variable.*** Hint: if your variable is continuous, you will need to determine your own cutoffs for the different levels of the factor. If your variable is categorical and has more than two possible values, choose the two that are the most common.
+```{r}
+
+menopause_na_status <- !is.na(maf_object@clinical.data$menopause_status)
+postmenopause_status <- ifelse (maf_object@clinical.data$menopause_status == "Post (prior bilateral ovariectomy OR >12 mo since LMP with no prior hysterectomy)", TRUE, FALSE)
+
+maf_object@clinical.data <- maf_object@clinical.data[menopause_na_status,]
+postmenopause_status <- factor(postmenopause_status)
+maf_object@clinical.data$mask_postmenopause_status <- postmenopause_status
+head(maf_object@clinical.data)
+
+
+```
+
+
+*2*
+Create a co-oncoplot with the top 10-20 (you choose) most mutated genes for the two groups. Pick one that has a large discrepancy in % mutated or type of mutations between the groups and research it. 
+Research it. What is the gene used for? Can you think of any reason for the discrepancy?
+```{r}
+mutation_counts <- table(maf$Hugo_Symbol)
+top_mutated_genes <- names(sort(mutation_counts, decreasing = TRUE)[1:10])
+mutation_counts[top_mutated_genes]
+subset_data <- maf[maf$Hugo_Symbol %in% top_mutated_genes, ]
+str(subset_data)
+
+coOncoplot(
+  m1 = subset_data,
+  m1Name = "Top Mutated Genes",
+  anno_height = 4,
+  outer_mar = 4,
+  barcode_mar = 1.5,
+  geneNamefont = 0.8,
+  gene_mar = 1.9,
+  titleFontSize = 1,
+  borderCol = NA
+)
+
+
+## PIK3CA is a gene that codes for a protein that is a subunit of the PI3K enzyme, which conducts signalling that helps regulate cell proliferation (MedLine Plus). It makes sense that this gene has high levels of mutation in breast cancer, because if it is mutated that could cause abnormally high levels of cell proliferation as seen in cancer. 
+
+```
+
+
+*3*
+Create a contingency table with your variable and chosen gene. Run a Fisher’s Exact Test between presence of mutations for that gene and your clinical variable. Create and save a mosaic plot. 
+Interpret the output of the Fisher’s Exact Test in terms of the odds ratio and p-value.
+```{r}
+
+PIK3CA_mask <- maf_object@data$Hugo_Symbol == "PIK3CA"
+
+maf_object@clinical.data$PIK3CA_mutated <- ifelse(PIK3CA_mask, "Mutated", "Not Mutated")
+
+if (length(maf_object@clinical.data$PIK3CA_mutated) == nrow(maf_object@clinical.data)) {
+  contig <- table(maf_object@clinical.data$sufficient_lymph_exams, maf_object@clinical.data$PIK3CA_mutated)
+
+
+    # Run Fisher’s Exact Test
+    fisher_result <- fisher.test(contingency_table)
+
+
+                
+```
+
+
+*4*
+Subset your maf_object based on your chosen clinical variable and create a co-lollipop plot of your chosen gene divided between the two different clinical variable possibilities. Include descriptive names on your plot.
+Do you notice any difference in terms of mutations (e.g. sites, types, number) between the two populations?
+```{r}
+
+postmenopause_status <- maf@clinical.data$postmenopause_status
+
+PIK3CA_mask <- maf@data$Hugo_Symbol == "PIK3CA"
+
+postmenopause_maf <- maf[postmenopause_status, ]
+
+PIK3CA_mask_postmenopause <- PIK3CA_mask[postmenopause_status]
+PIK3CA_mask_nonpostmenopause <- PIK3CA_mask[!postmenopause_status]
+
+lollipop_plot <- lollipopPlot(
+  m1 = postmenopause_maf[PIK3CA_mask_postmenopause, ],
+  m2 = maf[PIK3CA_mask_nonpostmenopause, ],
+  m1_name = "Post-menopause",
+  m2_name = "Non-post menopause",
+  gene = "PIK3CA"
+)
+
+print(lollipop_plot)
+
+
+
+*5*
+Create your Overall_Survival_Status column and create a mafSurvival KM plot based on mutations in your chosen gene.
+Does there seem to be a difference? Hypothesize why or not based on the other analysis you did with the gene above.
+```{r}
+
+age_NA_mask <-  ifelse(!is.na(maf_object@clinical.data$age_at_diagnosis), T, F)
+maf_object@clinical.data <- maf_object@clinical.data[age_NA_mask, ]
+
+maf_object@clinical.data$survival_time <- ifelse(maf_object@clinical.data$last_contact_days_to != "[Not Available]", maf_object@clinical.data$survival_time <- maf_object@clinical.data$last_contact_days_to, maf_object@clinical.data$survival_time <- maf_object@clinical.data$death_days_to)
+
+maf_object@clinical.data$survival_time <- as.numeric(maf_object@clinical.data$survival_time)
+
+maf_object@clinical.data$death_event <- ifelse(maf_object@clinical.data$vital_status == "Alive", F, T)
+
+
+
+mafSurvival(maf = maf_object,
+            genes = "PIK3CA", 
+            time = "survival_time", 
+            Status = "death_event",  
+            isTCGA = TRUE)
+
+
+```
