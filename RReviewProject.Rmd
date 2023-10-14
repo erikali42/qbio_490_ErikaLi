@@ -1,0 +1,282 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+#set up working directory
+knitr::opts_knit$set(root.dir = normalizePath("/Users/erikali/Desktop/QBIO/qbio_490_ErikaLi/analysis_data"))
+```
+```{r}
+#load libraries
+library(BiocManager)
+library(TCGAbiolinks)
+library(maftools)
+library(survival)
+library(survminer)
+library(ggplot2)
+library(DESeq2) 
+```
+```{r}
+#clinical data
+clin_query <- GDCquery(project = "TCGA-SKCM",
+data.category = "Clinical",
+data.type = "Clinical Supplement",
+data.format = 'BCR Biotab')
+GDCdownload(clin_query)
+clinical.BCRtab.all <- GDCprepare(clin_query)
+clinic <- clinical.BCRtab.all$clinical_patient_skcm[-c(1,2),]
+```
+```{r}
+# mutation data
+colnames(clinic)[ colnames(clinic) == "bcr_patient_barcode" ] <-
+"Tumor_Sample_Barcode"
+maf_query <- GDCquery(
+project = "TCGA-SKCM",
+data.category = "Simple Nucleotide Variation",
+access = "open",
+data.type = "Masked Somatic Mutation",
+workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+GDCdownload(maf_query)
+maf <- GDCprepare(maf_query)
+maf_object <- read.maf(maf = maf,
+clinicalData = clinic,
+isTCGA = TRUE)
+```
+```{r}
+#summarized experiment 
+rna_query <- GDCquery(project ="TCGA-SKCM",
+data.category = "Transcriptome Profiling",
+data.type = "Gene Expression Quantification",
+workflow.type = "STAR - Counts")
+GDCdownload(rna_query)
+rna_se <- GDCprepare(rna_query)
+```
+
+```{r}
+write.csv(clinic, "/Users/ErikaLi/desktop/qbio/QBIO_490_erikali/analysis_data/skcm_clinical_data.csv", row.names = FALSE)
+clinic <- read.csv("/Users/ErikaLi/desktop/qbio/QBIO_490_erikali/analysis_data/skcm_clinical_data.csv")
+```
+```{r}
+# 1) survival analysis between metastatic and non-metastatic patients
+
+rna_clinical <- as.data.frame(rna_se@colData)
+
+rna_clinical$survival <- ifelse(is.na(rna_clinical$days_to_death), rna_clinical$days_to_last_follow_up, rna_clinical$days_to_death)
+
+rna_clinical$death_event <- ifelse(rna_clinical$vital_status == "Alive", FALSE, TRUE)
+
+# mask out values that are not "Primary solid tumor" or "Metastatic"
+normal_mask <- ifelse(rna_clinical$definition == "Solid Tissue Normal", F, T)
+rna_clinical_masked <- rna_clinical[normal_mask,]
+
+additional_metastatic_mask <- ifelse(rna_clinical_masked$definition == "Additional Metastatic", F, T)
+rna_clinical_masked <- rna_clinical_masked[additional_metastatic_mask,]
+
+#survival
+survival_object <- Surv(time = rna_clinical_masked$survival, event = rna_clinical_masked$death_event)
+
+fit_object <- survfit(survival_object ~ definition, data = rna_clinical_masked)
+
+survplot <- ggsurvplot(fit_object,
+                       pval = TRUE,
+                       ggtheme = theme(plot.margin = unit(1, "cm")),
+                       legend = "right") 
+
+KM_plot <- survplot$plot + 
+  theme_bw() +
+  theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size = 16),
+        legend.title = element_text(size = 14),
+        legend.text = element_text(size = 12))
+
+print(KM_plot)
+ggsave("/Users/ErikaLi/desktop/KM_plotrreview.png", plot = KM_plot)
+
+
+```
+```{r}
+# 1) mutation differences between metastatic and non-metastatic patients for multiple genes
+maf_query <- GDCquery(
+    project = "TCGA-SKCM", 
+    data.category = "Simple Nucleotide Variation", 
+    access = "open", 
+    data.type = "Masked Somatic Mutation", 
+    workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+
+#GDCdownload(maf_query)
+
+rna_clinical$Tumor_Sample_Barcode <- rna_clinical$patient
+
+# reading mutation data
+maf_object <- read.maf(maf = maf, 
+                       clinicalData = rna_clinical,  # Use 'rna_clinical' here
+                       isTCGA = TRUE)
+
+# create metastatic mask
+metastatic_mask <- maf_object@clinical.data$definition == "Metastatic"
+
+# get sample IDs for metastatic and non-metastatic patients
+meta_patient_barcodes <- maf_object@clinical.data$Tumor_Sample_Barcode[metastatic_mask]
+nonmeta_patient_barcodes <- maf_object@clinical.data$Tumor_Sample_Barcode[!metastatic_mask]
+
+# subset mutation data
+meta_maf <- subsetMaf(maf = maf_object, tsb = meta_patient_barcodes)
+nonmeta_maf <- subsetMaf(maf = maf_object, tsb = nonmeta_patient_barcodes)
+
+# obtain gene summaries
+metagenes <- getGeneSummary(meta_maf)[1:10]
+non_meta_genes <- getGeneSummary(nonmeta_maf)[1:10]
+
+total_gene <- merge(metagenes[, .(Hugo_Symbol, MutatedSamples)],
+                    non_meta_genes[, .(Hugo_Symbol, MutatedSamples)],
+                    by = 'Hugo_Symbol', all = TRUE)
+
+
+total_gene$MutatedSamples.x[is.na(total_gene$MutatedSamples.x)] = 0
+total_gene$MutatedSamples.y[is.na(total_gene$MutatedSamples.y)] = 0
+total_gene$maxVal = apply(total_gene[, .(MutatedSamples.x, MutatedSamples.y)], 1, max)
+
+total_gene = total_gene[order(total_gene$maxVal, decreasing = TRUE), ]
+
+coOncoplot <- coOncoplot(m1 = meta_maf,
+            m2 = nonmeta_maf,
+            m1Name = 'Metastatic Patients',
+            m2Name = 'Non-metastatic Patients',
+            genes = total_gene$Hugo_Symbol,
+            borderCol = NA)
+
+ggsave("/Users/ErikaLi/desktop/cooncoplotrreview.png", plot = coOncoplot$plot)
+
+
+```
+```{r}
+# 3) mutation data for specific gene of interest (TTN)
+lollipop <- lollipopPlot2(m1 = meta_maf,
+              m2 = nonmeta_maf,
+              m1_name = 'Metastatic',
+              m2_name = 'Non-Metastatic Patients',
+              gene = 'TTN')
+
+ggsave("/Users/ErikaLi/desktop/lollipoprreview.png", plot = lollipop$plot)
+
+```
+```{r}
+# 4) cooccurence or mutual exclusion of common gene mutations: one for metastatic patients, one for non-metastatic patients
+
+# metastatic patients
+plot_meta <- somaticInteractions(maf = meta_maf, top = 10, pvalue = c(0.05, 0.1))
+ggsave("/Users/ErikaLi/desktop/somatic_interactions_metastatic.png", plot = plot_meta)
+
+# non-metastatic patients
+plot_nonmeta <- somaticInteractions(maf = nonmeta_maf, top = 10, pvalue = c(0.05, 0.1))
+ggsave("/Users/ErikaLi/desktop/somatic_interactions_nonmetastatic.png", plot = plot_nonmeta)
+
+
+
+```
+```{r}
+# 5) differential expression between non-metastatic and metastatic patients controlling for treatment effects, race, gender, and vital status
+rna_genes <- rna_se@rowRanges@elementMetadata
+rna_genes <- as.data.frame(rna_genes)
+rna_counts <- rna_se@assays@data$unstranded
+rna_counts <- as.data.frame(rna_counts)
+rownames(rna_genes) <- rna_genes$gene_id
+rownames(rna_counts) <- rna_genes$gene_id
+colnames(rna_counts) <- rownames(rna_clinical)
+
+rna_counts_filtered <- rna_counts[rowSums(rna_counts) >= 20, ]
+
+# remove columns with na values
+columns_to_remove <- c(471, 473)
+rna_counts_filtered_masked <- rna_counts[, -columns_to_remove]
+
+# check the dimensions of the filtered data
+dim(rna_counts_filtered_masked)
+
+#check if a patient has received radiation
+rna_clinical_masked$received_radiation <- ifelse(rna_clinical_masked$patient %in% rad$bcr_patient_barcode, 1, 0)
+
+
+# convert column names to lowercase and remove commas and brackets
+colnames(rna_clinical) <- tolower(colnames(rna_clinical))
+colnames(rna_clinical) <- gsub(",", "", colnames(rna_clinical))
+colnames(rna_clinical) <- gsub("\\[Not Available\\]", "not available", colnames(rna_clinical))
+
+# extract unique treatment types from drug dataframe
+treatment_types <- unique(drug$pharmaceutical_therapy_type)
+
+# create binary columns for each treatment type, removing unnecessary ones
+for (treatment in treatment_types) {
+  cleaned_treatment <- tolower(gsub(" ", "_", treatment))
+  if (cleaned_treatment %in% c("hormone_therapy", "ancillary","other_specify_in_notes", "not_available")) {
+    next  
+  }
+  rna_clinical_masked[[cleaned_treatment]] <- as.integer(rna_clinical_masked$patient %in% drug$bcr_patient_barcode[drug$pharmaceutical_therapy_type == treatment])
+}
+
+# design matrix including covariates
+design_matrix <- model.matrix(~ received_radiation + chemotherapy + immunotherapy + targeted_molecular_therapy + vaccine + race + gender + vital_status, data = rna_clinical_masked)
+
+#remove unnecessary columns
+columns_to_remove <- c('racenot reported', 'raceblack or african american', 'vital_statusNot Reported', 'racenotreported', '(Intercept)')
+
+design_matrix <- design_matrix[, !(colnames(design_matrix) %in% columns_to_remove)]
+
+rownames(rna_counts_filtered_masked) <- NULL
+colnames(rna_counts_filtered_masked) <- NULL
+
+# convert variables to factors
+design_matrix$received_radiation <- factor(design_matrix$received_radiation)
+design_matrix$chemotherapy <- factor(design_matrix$chemotherapy)
+design_matrix$immunotherapy <- factor(design_matrix$immunotherapy)
+design_matrix$targeted_molecular_therapy <- factor(design_matrix$targeted_molecular_therapy)
+design_matrix$vaccine <- factor(design_matrix$vaccine)
+design_matrix$racewhite <- factor(design_matrix$racewhite)
+design_matrix$gendermale <- factor(design_matrix$gendermale)
+design_matrix$vital_statusDead <- factor(design_matrix$vital_statusDead)
+
+# include the 'definition' variable in design_matrix (metastatic or primary solid tumor)
+design_matrix$definition <- factor(rna_clinical_masked$definition)
+levels(design_matrix$definition) <- c("metastatic", "primary_solid_tumor")
+
+
+# create DESeqDataSet from filtered RNA-seq data and design matrix
+dds <- DESeqDataSetFromMatrix(
+  countData = rna_counts_filtered_masked,
+  colData = design_matrix,
+  design = ~ definition + received_radiation + chemotherapy + immunotherapy + targeted_molecular_therapy + vaccine + racewhite + gendermale + vital_statusDead
+)
+
+dds <- DESeq(dds)
+results <- results(dds, cooksCutoff = FALSE)
+
+# filter results for significance
+significant_results <- subset(results, padj < 0.05 & abs(log2FoldChange) > 1)
+print(significant_results)
+
+# convert to data frame for plotting
+results_df <- as.data.frame(results)
+
+# volcano plot
+volcano_plot <- ggplot(results_df, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(color = "red") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +
+  labs(title = "Volcano Plot of Differential Expression",
+       x = "Log2 Fold Change",
+       y = "-Log10 Adjusted P-value") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(-10, 10))
+
+print(volcano_plot)
+ggsave("/Users/ErikaLi/desktop/volcano_plotrreview.png", plot = volcano_plot)
+
+```
+
